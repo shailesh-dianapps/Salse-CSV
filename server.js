@@ -14,7 +14,6 @@ const app = express();
 // --- Middleware ---
 app.use(express.json());
 app.use(requestLogger);
-
 connectDB();
 
 app.use('/auth', authRoutes);

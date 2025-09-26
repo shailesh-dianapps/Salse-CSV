@@ -25,7 +25,7 @@ exports.loginUser = async (req, res) => {
 
         const user = await User.findOne({username});
         if(!user){
-            return res.status(401).json({error: 'Invalid credentials or user is deactivated.'});
+            return res.status(401).json({error: 'username not exist.'});
         }
 
         const isMatch = await user.comparePassword(password);
@@ -53,7 +53,7 @@ exports.logoutUser = async (req, res) => {
             return res.status(400).json({error: "No token provided"});
         }
 
-        await Session.deleteOne({ token });
+        await Session.deleteOne({token});
         res.json({message: 'Logged out successfully.'});
     } 
     catch(error){

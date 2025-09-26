@@ -14,7 +14,7 @@ function setupFileWatcher(folderPath) {
     watcher.on('add', async (filePath) => {
         const resolvedPath = path.resolve(filePath);
         const filename = path.basename(resolvedPath);
-        console.log(`New file detected: ${filename}`);
+        console.log(`New file detected: ${filename}`);                             
 
         try{
             const existingEntry = await FileEntry.findOne({filename});
