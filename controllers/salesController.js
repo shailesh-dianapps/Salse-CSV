@@ -1,29 +1,51 @@
 const SalesRecord = require('../models/sale');
 
 exports.listSalesRecords = async (req, res) => {
-    const {page = 1, limit = 10, sort = 'orderDate', ...filters} = req.query;
+    const {page = 1, limit = 10, sort = 'orderDate', search, ...filters} = req.query;
     const userId = req.user._id;
 
-    try{
-        const query = { user: userId };
+    try {
+        const query = {user: userId};
 
-        // Apply dynamic filters from query params (case-insensitive regex search)
+        const allowedFilters = ["region", "country", "itemType", "salesChannel", "orderPriority"];
         for(const key in filters){
-            if(filters[key]){
-                query[key] = new RegExp(filters[key], 'i');
+            if (allowedFilters.includes(key) && filters[key]){
+                query[key] = new RegExp(filters[key], 'i'); 
             }
+        }
+
+        // Global search across multiple fields
+        if(search){
+            query.$or = [
+                {region: new RegExp(search, 'i')},
+                {country: new RegExp(search, 'i')},
+                {itemType: new RegExp(search, 'i')},
+                {salesChannel: new RegExp(search, 'i')},
+                {orderPriority: new RegExp(search, 'i')},
+                {orderId: new RegExp(search, 'i')}
+            ];
         }
 
         const numericLimit = Math.max(parseInt(limit, 10) || 10, 1);
         const numericPage = Math.max(parseInt(page, 10) || 1, 1);
 
         const records = await SalesRecord.find(query)
-            .sort({[sort]: 1}) 
+            .sort({ [sort]: 1 })
             .limit(numericLimit)
             .skip((numericPage - 1) * numericLimit)
             .exec();
 
         const count = await SalesRecord.countDocuments(query);
+
+        if(records.length === 0){
+            return res.status(404).json({
+                message: "No sales records found for the given search/filter.",
+                records: [],
+                totalPages: 0,
+                currentPage: numericPage,
+                totalRecords: 0
+            });
+        }
 
         res.json({
             records,
@@ -31,7 +53,7 @@ exports.listSalesRecords = async (req, res) => {
             currentPage: numericPage,
             totalRecords: count
         });
-    }
+    } 
     catch(error){
         console.error('List sales error:', error.message);
         res.status(500).json({error: 'Failed to fetch sales records.'});
