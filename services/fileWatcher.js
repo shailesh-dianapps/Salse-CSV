@@ -1,20 +1,186 @@
+// const chokidar = require('chokidar');
+// const path = require('path');
+// const fs = require('fs/promises');
+// const {fork} = require('child_process');
+// const FileEntry = require('../models/fileEntry');
+
+// function setupFileWatcher(folderPath) {
+//     const watcher = chokidar.watch(folderPath, {
+//         ignored: /^\./,       // ignore dotfiles
+//         persistent: true,
+//         ignoreInitial: true,  // ignore existing files at startup
+//     });
+
+//     watcher.on('add', async (filePath) => {
+//         const resolvedPath = path.resolve(filePath);
+//         const filename = path.basename(resolvedPath);
+//         console.log(`New file detected: ${filename}`);                             
+
+//         try{
+//             const existingEntry = await FileEntry.findOne({filename});
+//             if(existingEntry){
+//                 console.log(`File ${filename} already processed. Skipping.`);
+//                 return;
+//             }
+
+//             const fileEntry = await FileEntry.create({
+//                 filename,
+//                 folderPath: path.dirname(resolvedPath)
+//             });
+//             console.log(`Created DB entry for ${filename}.`);
+
+//             const child = fork(path.join(__dirname, 'csvWorker.js'));
+//             child.send({filePath: resolvedPath, fileId: fileEntry._id});
+
+//             child.on('message', async (message) => {
+//                 if(message.status === 'completed'){
+//                     console.log(`Processing of ${filename} completed. Inserted: ${message.totalInserted}`);
+//                     await FileEntry.findByIdAndUpdate(message.fileId, {
+//                         processed: true,
+//                         processedAt: new Date(),
+//                         recordCount: message.totalInserted
+//                     });
+//                     await fs.unlink(resolvedPath);
+//                     console.log(`File ${filename} deleted.`);
+//                     child.kill();
+//                 } 
+//                 else if(message.status === 'error'){
+//                     console.error(`Error processing ${filename}: ${message.error}`);
+//                     await FileEntry.findByIdAndUpdate(message.fileId, {errorLog: message.error});
+//                     child.kill();
+//                 }
+//             });
+
+//             child.on('error', (err) => {
+//                 console.error(`Child process error for ${filename}:`, err);
+//             });
+
+//             child.on('exit', (code, signal) => {
+//                 if(code !== 0) console.warn(`Child process exited with code ${code} (${signal})`);
+//             });
+
+//         } 
+//         catch(error){
+//             console.error(`Failed to handle file ${filename}:`, error);
+//         }
+//     });
+// }
+
+// module.exports = { setupFileWatcher };
+
+
+
+
+
+
+
 const chokidar = require('chokidar');
 const path = require('path');
 const fs = require('fs/promises');
-const {fork} = require('child_process');
+const readline = require('readline');
+const { Worker } = require('worker_threads');
+const { performance } = require('perf_hooks');
 const FileEntry = require('../models/fileEntry');
+
+const NUM_WORKERS = 4; // Adjust based on CPU cores
+
+async function countLines(filePath) {
+    const fileStream = require('fs').createReadStream(filePath);
+    const rl = readline.createInterface({input: fileStream, crlfDelay: Infinity});
+    let lineCount = 0;
+    for await (const _ of rl) lineCount++;
+    return Math.max(0, lineCount - 1); // subtract header
+}
+
+async function processFileWithWorkers(filePath, fileEntry) {
+    const startTime = performance.now();
+
+    const totalLines = await countLines(filePath);
+    const linesPerWorker = Math.ceil(totalLines / NUM_WORKERS);
+
+    let totalProcessed = 0;
+    let completedWorkers = 0;
+    let failedWorkers = 0;
+
+    console.log(`Processing ${fileEntry.filename} with ${NUM_WORKERS} workers (${totalLines} data lines)`);
+
+    const workers = [];
+
+    for(let i=0; i<NUM_WORKERS; i++){
+        const startLine = i * linesPerWorker + 1;
+        const endLine = Math.min(totalLines + 1, startLine + linesPerWorker - 1);
+
+        if(startLine > totalLines) break;
+
+        const workerStartTime = performance.now();
+
+        const worker = new Worker(path.join(__dirname, 'csvWorker.js'), {
+            workerData: {
+                filePath,
+                fileId: fileEntry._id.toString(),
+                startLine,
+                endLine,
+                mongoUri: process.env.MONGODB_URI
+            }
+        });
+
+        workers.push(worker);
+
+        worker.on('message', async (msg) => {
+            if(msg.status === 'completed'){
+                const workerEndTime = performance.now();
+                const workerTime = ((workerEndTime - workerStartTime) / 1000).toFixed(2);
+                console.log(`Worker ${startLine}-${endLine} finished in ${workerTime}s. Processed ${msg.totalProcessed} records.`);
+                totalProcessed += msg.totalProcessed;
+            } 
+            else if(msg.status === 'error'){
+                console.error(`Worker ${startLine}-${endLine} error: ${msg.error}`);
+                failedWorkers++;
+            }
+
+            completedWorkers++;
+            worker.terminate();
+
+            if(completedWorkers === workers.length){
+                const endTime = performance.now();
+                const totalTime = ((endTime - startTime) / 1000).toFixed(2);
+                console.log(`🎯 All workers finished. Total processed: ${totalProcessed}`);
+                console.log(`⏱ Total processing time: ${totalTime} seconds`);
+
+                try{
+                    await FileEntry.findByIdAndUpdate(fileEntry._id, {
+                        processed: failedWorkers === 0,
+                        processedAt: new Date(),
+                        recordCount: totalProcessed
+                    });
+                    await fs.unlink(filePath);
+                    console.log(`File ${path.basename(filePath)} deleted at ${new Date().toLocaleTimeString()}`);
+                } 
+                catch(dbError){
+                    console.error('Final update/delete failed:', dbError);
+                }
+            }
+        });
+
+        worker.on('error', (err) => {
+            console.error(`Worker thread error: ${err.message}`);
+            completedWorkers++;
+            failedWorkers++;
+        });
+    }
+}
 
 function setupFileWatcher(folderPath) {
     const watcher = chokidar.watch(folderPath, {
-        ignored: /^\./,       // ignore dotfiles
+        ignored: /^\./,
         persistent: true,
-        ignoreInitial: true,  // ignore existing files at startup
+        ignoreInitial: true
     });
 
     watcher.on('add', async (filePath) => {
         const resolvedPath = path.resolve(filePath);
         const filename = path.basename(resolvedPath);
-        console.log(`New file detected: ${filename}`);                             
+        console.log(`New file detected: ${filename}`);
 
         try{
             const existingEntry = await FileEntry.findOne({filename});
@@ -27,37 +193,9 @@ function setupFileWatcher(folderPath) {
                 filename,
                 folderPath: path.dirname(resolvedPath)
             });
-            console.log(`Created DB entry for ${filename}.`);
+            console.log(`Created DB entry for ${filename}. Starting multithreaded processing.`);
 
-            const child = fork(path.join(__dirname, 'csvWorker.js'));
-            child.send({filePath: resolvedPath, fileId: fileEntry._id});
-
-            child.on('message', async (message) => {
-                if(message.status === 'completed'){
-                    console.log(`Processing of ${filename} completed. Inserted: ${message.totalInserted}`);
-                    await FileEntry.findByIdAndUpdate(message.fileId, {
-                        processed: true,
-                        processedAt: new Date(),
-                        recordCount: message.totalInserted
-                    });
-                    await fs.unlink(resolvedPath);
-                    console.log(`File ${filename} deleted.`);
-                    child.kill();
-                } 
-                else if(message.status === 'error'){
-                    console.error(`Error processing ${filename}: ${message.error}`);
-                    await FileEntry.findByIdAndUpdate(message.fileId, {errorLog: message.error});
-                    child.kill();
-                }
-            });
-
-            child.on('error', (err) => {
-                console.error(`Child process error for ${filename}:`, err);
-            });
-
-            child.on('exit', (code, signal) => {
-                if(code !== 0) console.warn(`Child process exited with code ${code} (${signal})`);
-            });
+            await processFileWithWorkers(resolvedPath, fileEntry);
 
         } 
         catch(error){
