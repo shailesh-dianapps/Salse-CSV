@@ -73,53 +73,35 @@
 
 
 
-
 const chokidar = require('chokidar');
 const path = require('path');
 const fs = require('fs/promises');
-const readline = require('readline');
 const { Worker } = require('worker_threads');
 const { performance } = require('perf_hooks');
 const FileEntry = require('../models/fileEntry');
 
 const NUM_WORKERS = 4; // Adjust based on CPU cores
 
-async function countLines(filePath) {
-    const fileStream = require('fs').createReadStream(filePath);
-    const rl = readline.createInterface({input: fileStream, crlfDelay: Infinity});
-    let lineCount = 0;
-    for await (const _ of rl) lineCount++;
-    return Math.max(0, lineCount - 1); // subtract header
-}
-
 async function processFileWithWorkers(filePath, fileEntry) {
     const startTime = performance.now();
-
-    const totalLines = await countLines(filePath);
-    const linesPerWorker = Math.ceil(totalLines / NUM_WORKERS);
 
     let totalProcessed = 0;
     let completedWorkers = 0;
     let failedWorkers = 0;
 
-    console.log(`Processing ${fileEntry.filename} with ${NUM_WORKERS} workers (${totalLines} data lines)`);
+    console.log(`Processing ${fileEntry.filename} with ${NUM_WORKERS} workers`);
 
     const workers = [];
 
     for(let i=0; i<NUM_WORKERS; i++){
-        const startLine = i * linesPerWorker + 1;
-        const endLine = Math.min(totalLines + 1, startLine + linesPerWorker - 1);
-
-        if(startLine > totalLines) break;
-
         const workerStartTime = performance.now();
 
         const worker = new Worker(path.join(__dirname, 'csvWorker.js'), {
             workerData: {
                 filePath,
                 fileId: fileEntry._id.toString(),
-                startLine,
-                endLine,
+                workerIndex: i,
+                numWorkers: NUM_WORKERS,
                 mongoUri: process.env.MONGODB_URI
             }
         });
@@ -130,11 +112,11 @@ async function processFileWithWorkers(filePath, fileEntry) {
             if(msg.status === 'completed'){
                 const workerEndTime = performance.now();
                 const workerTime = ((workerEndTime - workerStartTime) / 1000).toFixed(2);
-                console.log(`Worker ${startLine}-${endLine} finished in ${workerTime}s. Processed ${msg.totalProcessed} records.`);
+                console.log(`Worker ${i} finished in ${workerTime}s. Processed ${msg.totalProcessed} records.`);
                 totalProcessed += msg.totalProcessed;
             } 
             else if(msg.status === 'error'){
-                console.error(`Worker ${startLine}-${endLine} error: ${msg.error}`);
+                console.error(`Worker ${i} error: ${msg.error}`);
                 failedWorkers++;
             }
 
@@ -144,8 +126,8 @@ async function processFileWithWorkers(filePath, fileEntry) {
             if(completedWorkers === workers.length){
                 const endTime = performance.now();
                 const totalTime = ((endTime - startTime) / 1000).toFixed(2);
-                console.log(`🎯 All workers finished. Total processed: ${totalProcessed}`);
-                console.log(`⏱ Total processing time: ${totalTime} seconds`);
+                console.log(`All workers finished. Total processed: ${totalProcessed}`);
+                console.log(`Total processing time: ${totalTime} seconds`);
 
                 try{
                     await FileEntry.findByIdAndUpdate(fileEntry._id, {
@@ -153,7 +135,7 @@ async function processFileWithWorkers(filePath, fileEntry) {
                         processedAt: new Date(),
                         recordCount: totalProcessed
                     });
-                    await fs.unlink(filePath);
+                    await fs.unlink(filePath); // Delete file after processing
                     console.log(`File ${path.basename(filePath)} deleted at ${new Date().toLocaleTimeString()}`);
                 } 
                 catch(dbError){
@@ -182,7 +164,7 @@ function setupFileWatcher(folderPath) {
         const filename = path.basename(resolvedPath);
         console.log(`New file detected: ${filename}`);
 
-        try{
+        try {
             const existingEntry = await FileEntry.findOne({filename});
             if(existingEntry){
                 console.log(`File ${filename} already processed. Skipping.`);
@@ -196,7 +178,6 @@ function setupFileWatcher(folderPath) {
             console.log(`Created DB entry for ${filename}. Starting multithreaded processing.`);
 
             await processFileWithWorkers(resolvedPath, fileEntry);
-
         } 
         catch(error){
             console.error(`Failed to handle file ${filename}:`, error);

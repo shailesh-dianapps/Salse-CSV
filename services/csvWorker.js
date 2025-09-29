@@ -89,7 +89,6 @@
 
 
 
-
 const { parentPort, workerData } = require('worker_threads');
 const fs = require('fs');
 const csv = require('csv-parser');
@@ -103,7 +102,7 @@ const BATCH_SIZE = 5000;
 (async () => {
     try{
         await mongoose.connect(workerData.mongoUri, {autoIndex: false, maxPoolSize: 20});
-        console.log('Worker connected to MongoDB.');
+        console.log(`Worker ${workerData.workerIndex} connected to MongoDB.`);
         await processChunk();
     } 
     catch(err){
@@ -112,8 +111,9 @@ const BATCH_SIZE = 5000;
     }
 })();
 
-async function processChunk() {
-    const {filePath, startLine, endLine} = workerData;
+async function processChunk(){
+    const {filePath, workerIndex, numWorkers} = workerData;
+
     let buffer = [];
     let totalProcessed = 0;
     let currentLine = 0;
@@ -136,14 +136,14 @@ async function processChunk() {
 
             totalProcessed += insertedCount + upsertedCount;
 
-            console.log(`Worker batch inserted: ${batch.length} docs. Total processed: ${totalProcessed}`);
+            console.log(`Worker ${workerIndex} batch inserted: ${batch.length} docs. Total processed: ${totalProcessed}`);
 
             if(insertedCount + upsertedCount < batch.length){
-                console.log(`Duplicate records detected in this batch.`);
+                console.log(`Worker ${workerIndex} detected duplicate records in this batch.`);
             }
         } 
         catch(err){
-            console.error('BulkWrite failed:', err.message);
+            console.error(`Worker ${workerIndex} BulkWrite failed:`, err.message);
         }
     };
 
@@ -155,8 +155,9 @@ async function processChunk() {
 
         stream.on('data', async (row) => {
             currentLine++;
-            if (currentLine <= startLine) return;
-            if (currentLine > endLine) return stream.destroy();
+
+            // Let each worker handle a fraction of rows
+            if((currentLine - 1) % numWorkers !== workerIndex) return;
 
             buffer.push({
                 region: row.Region,
@@ -188,16 +189,18 @@ async function processChunk() {
             if(buffer.length > 0) await processBatch(buffer);
 
             const endTime = performance.now();
-            console.log(`Worker chunk ${startLine}-${endLine} finished in ${((endTime - performance.timeOrigin)/1000).toFixed(2)}s. Total processed: ${totalProcessed}`);
+            console.log(`Worker ${workerIndex} finished in ${((endTime - performance.timeOrigin) / 1000).toFixed(2)}s. Total processed: ${totalProcessed}`);
+
             parentPort.postMessage({status: 'completed', totalProcessed});
         });
 
         stream.on('error', (err) => {
-            console.error('CSV stream error:', err.message);
+            console.error(`Worker ${workerIndex} CSV stream error:`, err.message);
             parentPort.postMessage({status: 'error', error: err.message});
         });
     } 
     catch(error){
+        console.error(`Worker ${workerIndex} fatal error:`, error.message);
         parentPort.postMessage({status: 'error', error: error.message});
     }
 }
