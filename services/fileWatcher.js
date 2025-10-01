@@ -80,7 +80,7 @@ const { Worker } = require('worker_threads');
 const { performance } = require('perf_hooks');
 const FileEntry = require('../models/fileEntry');
 
-const NUM_WORKERS = 4; // Adjust based on CPU cores
+const NUM_WORKERS = 2; 
 
 async function processFileWithWorkers(filePath, fileEntry) {
     const startTime = performance.now();
