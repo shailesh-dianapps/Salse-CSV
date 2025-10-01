@@ -19,10 +19,4 @@ userSchema.methods.comparePassword = async function (candidatePassword) {
     return bcrypt.compare(candidatePassword, this.password);
 };
 
-// Deactivate user
-userSchema.methods.deactivate = function () {
-    this.isActive = false;
-    return this.save();
-};
-
 module.exports = mongoose.model('User', userSchema);
